@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urbanomy-paper"
+version = "0.1.0"
+description = "Reproducible notebook and minimal Urbanomy code for the paper experiments"
+requires-python = ">=3.10,<=3.13"
+dependencies = [
+    "blocksnet[full,ipynb]==1.0.0.a9",
+    "catboost",
+    "geopandas>=1.0.0,<2.0.0",
+    "ipykernel",
+    "jupyter",
+    "langchain>=0.3,<0.4",
+    "langchain-core>=0.3,<0.4",
+    "langchain-openai>=0.2,<0.4",
+    "langgraph>=0.2,<1.1",
+    "libpysal",
+    "matplotlib",
+    "numpy",
+    "pandas>=2.2.3",
+    "pillow",
+    "pymoo",
+    "python-dotenv>=1,<2",
+    "shapely",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["urbanomy*"]

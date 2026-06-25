@@ -1,0 +1,7 @@
+.env
+.ipynb_checkpoints/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+optimization_log_land_value.gif
