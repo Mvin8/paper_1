@@ -19,6 +19,7 @@ from .pareto_front_dataframe import build_pareto_front_dataframe
 from .scenario_modification import ScenarioTEPModifier, plot_scenario_impact
 from .ga_mc_optimizer import (
     DistrictProblem,
+    Evaluation,
     StrategicAlignmentScorer,
     build_nsga3_reference_directions,
     run_nsga2_with_strategic_alignment,
@@ -40,6 +41,7 @@ __all__ = [
     "ScenarioTEPModifier",
     "plot_scenario_impact",
     "DistrictProblem",
+    "Evaluation",
     "StrategicAlignmentScorer",
     "build_nsga3_reference_directions",
     "run_nsga2_with_strategic_alignment",

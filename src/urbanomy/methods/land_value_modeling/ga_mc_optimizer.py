@@ -29,6 +29,7 @@ from pymoo.optimize import minimize  # Функция для запуска оп
 from pymoo.problems import get_problem  # Для получения тестовых задач
 from pymoo.util.ref_dirs import get_reference_directions
 from pymoo.visualization.scatter import Scatter  # Для визуализации
+from pydantic import BaseModel, Field
 
 from urbanomy.methods.investment_potential import (
     DEFAULT_BENCHMARKS_RU,
@@ -96,6 +97,10 @@ def _strip_code_fences(text: str) -> str:
     return cleaned.strip()
 
 
+class Evaluation(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+
+
 class StrategicAlignmentScorer:
     """Score scenarios with an LLM or baseline."""
 
@@ -112,30 +117,40 @@ class StrategicAlignmentScorer:
             raise ValueError("prompt must be a non-empty string.")
         if llm is None and baseline is None:
             raise ValueError("Either llm or baseline must be provided.")
-        self.llm = llm
+        self._llm = llm
         self.baseline = baseline
         self.prompt = prompt_text
         self.max_retries = max(0, int(max_retries))
         self._cache: dict[str, dict[str, Any]] = {}
 
+    @property
+    def llm(self) -> Any | None:
+        if self._llm is None:
+            return None
+        if hasattr(self._llm, "with_structured_output"):
+            return self._llm.with_structured_output(Evaluation.model_json_schema())
+        return self._llm
+
     def __deepcopy__(self, memo: dict[int, Any]):
         """Keep the underlying LLM by reference to avoid deepcopy/pickle failures in pymoo history."""
         copied = self.__class__.__new__(self.__class__)
         memo[id(self)] = copied
-        copied.llm = self.llm
+        copied._llm = self._llm
         copied.baseline = self.baseline
         copied.prompt = self.prompt
         copied.max_retries = self.max_retries
         copied._cache = copy.deepcopy(self._cache, memo)
         return copied
 
-    def _invoke(self, prompt: str) -> str:
+    def _invoke(self, prompt: str) -> Any:
         if self.baseline is not None:
             if hasattr(self.baseline, "invoke_state"):
-                return str(self.baseline.invoke_state(prompt).get("output", ""))
+                return self.baseline.invoke_state(prompt).get("output", "")
             response = self.baseline.invoke(prompt)
             return _message_to_text(response)
         response = self.llm.invoke(prompt)
+        if isinstance(response, (BaseModel, Mapping)):
+            return response
         return _message_to_text(response)
 
     def _build_prompt(self, *, candidate_payload: Mapping[str, Any]) -> str:
@@ -154,32 +169,37 @@ class StrategicAlignmentScorer:
             f"Исходный ответ:\n{raw_text}"
         )
 
-    def _parse_response(self, raw_text: str) -> tuple[float, str]:
-        cleaned = _strip_code_fences(raw_text)
-        if not cleaned:
-            raise ValueError("Empty LLM response.")
+    def _parse_response(self, raw_response: Any) -> tuple[float, str]:
+        if isinstance(raw_response, BaseModel):
+            payload: dict[str, Any] | None = raw_response.model_dump()
+        elif isinstance(raw_response, Mapping):
+            payload = dict(raw_response)
+        else:
+            cleaned = _strip_code_fences(raw_response)
+            if not cleaned:
+                raise ValueError("Empty LLM response.")
 
-        try:
-            numeric = float(cleaned)
-        except ValueError:
-            numeric = None
-        if numeric is not None:
-            return max(0.0, min(1.0, numeric)), ""
+            try:
+                numeric = float(cleaned)
+            except ValueError:
+                numeric = None
+            if numeric is not None:
+                return max(0.0, min(1.0, numeric)), ""
 
-        payload: dict[str, Any] | None = None
-        try:
-            parsed = json.loads(cleaned)
-            if isinstance(parsed, Mapping):
-                payload = dict(parsed)
-        except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-            if match:
-                parsed = json.loads(match.group(0))
+            payload = None
+            try:
+                parsed = json.loads(cleaned)
                 if isinstance(parsed, Mapping):
                     payload = dict(parsed)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group(0))
+                    if isinstance(parsed, Mapping):
+                        payload = dict(parsed)
 
         if payload is None:
-            raise ValueError(f"Unable to parse scorer JSON: {cleaned}")
+            raise ValueError(f"Unable to parse scorer JSON: {raw_response}")
 
         score_value = payload.get("score", payload.get("alignment_score", payload.get("ser_alignment_score")))
         if score_value is None:
