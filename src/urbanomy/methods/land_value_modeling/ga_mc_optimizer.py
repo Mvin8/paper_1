@@ -125,10 +125,6 @@ class StrategicAlignmentScorer:
 
     @property
     def llm(self) -> Any | None:
-        if self._llm is None:
-            return None
-        if hasattr(self._llm, "with_structured_output"):
-            return self._llm.with_structured_output(Evaluation.model_json_schema())
         return self._llm
 
     def __deepcopy__(self, memo: dict[int, Any]):
@@ -163,7 +159,7 @@ class StrategicAlignmentScorer:
     def _repair_prompt(self, *, raw_text: str, error_text: str) -> str:
         return (
             "Исправь ответ так, чтобы он стал валидным JSON без markdown.\n"
-            'Верни только JSON формата {"score": 0.0, "reasoning": "..."}. '
+            'Верни только JSON формата {"score": 0.0}. '
             "Поле score должно быть числом от 0 до 1.\n\n"
             f"Ошибка: {error_text}\n\n"
             f"Исходный ответ:\n{raw_text}"
@@ -201,11 +197,15 @@ class StrategicAlignmentScorer:
         if payload is None:
             raise ValueError(f"Unable to parse scorer JSON: {raw_response}")
 
-        score_value = payload.get("score", payload.get("alignment_score", payload.get("ser_alignment_score")))
-        if score_value is None:
-            raise ValueError("Scorer JSON does not contain a score field.")
+        if "score" not in payload and "content" in payload:
+            return self._parse_response(payload["content"])
 
-        score = max(0.0, min(1.0, float(score_value)))
+        if "score" not in payload:
+            fallback_score = payload.get("alignment_score", payload.get("ser_alignment_score"))
+            if fallback_score is not None:
+                payload["score"] = fallback_score
+
+        score = float(Evaluation.model_validate(payload).score)
         reasoning = str(
             payload.get("reasoning", payload.get("rationale", payload.get("summary", "")))
         ).strip()

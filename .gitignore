@@ -5,3 +5,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 optimization_log_land_value.gif
+data
+nsga_2_llm_prompts
+nsga_2_without_llm
