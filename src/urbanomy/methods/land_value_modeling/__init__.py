@@ -1,8 +1,4 @@
-"""Public exports for land value modelling utilities.
-
-Optional LLM helpers are imported defensively so the core estimators remain
-available in lightweight installs.
-"""
+"""Public exports for land value modelling utilities."""
 
 from .constants import (
     CATEGORICAL_FEATURES,
@@ -21,9 +17,7 @@ from .ga_mc_optimizer import (
     DistrictProblem,
     Evaluation,
     StrategicAlignmentScorer,
-    build_nsga3_reference_directions,
     run_nsga2_with_strategic_alignment,
-    run_nsga3_with_strategic_alignment,
 )
 
 __all__ = [
@@ -43,38 +37,5 @@ __all__ = [
     "DistrictProblem",
     "Evaluation",
     "StrategicAlignmentScorer",
-    "build_nsga3_reference_directions",
     "run_nsga2_with_strategic_alignment",
-    "run_nsga3_with_strategic_alignment",
 ]
-
-try:
-    from .pareto_llm_selector import (
-        ParetoMultiAgentOrchestrator,
-        WinnerScenarioQAResult,
-        ask_winner_scenario_question,
-        collect_pareto_scenarios,
-        run_pareto_vote,
-        select_best_pareto_scenario,
-        select_best_pareto_scenario_multiagent,
-    )
-except ImportError:
-    ParetoMultiAgentOrchestrator = None
-    WinnerScenarioQAResult = None
-    ask_winner_scenario_question = None
-    collect_pareto_scenarios = None
-    run_pareto_vote = None
-    select_best_pareto_scenario = None
-    select_best_pareto_scenario_multiagent = None
-else:
-    __all__.extend(
-        [
-            "ParetoMultiAgentOrchestrator",
-            "WinnerScenarioQAResult",
-            "ask_winner_scenario_question",
-            "collect_pareto_scenarios",
-            "run_pareto_vote",
-            "select_best_pareto_scenario",
-            "select_best_pareto_scenario_multiagent",
-        ]
-    )

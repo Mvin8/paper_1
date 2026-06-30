@@ -4,31 +4,20 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import copy
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
-import geopandas as gpd
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from blocksnet.analysis.indicators import calculate_density_indicators
 from blocksnet.analysis.morphotypes import get_strelka_morphotypes
 from blocksnet.enums import LandUse
 from catboost import CatBoostRegressor
 from geopandas import GeoDataFrame
-from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
-from matplotlib.transforms import offset_copy
 from pymoo.algorithms.moo.nsga2 import NSGA2  # Импорт алгоритма
-from pymoo.algorithms.moo.nsga3 import NSGA3
 from pymoo.core.callback import Callback
 from pymoo.core.problem import Problem
 from pymoo.optimize import minimize  # Функция для запуска оптимизации
-from pymoo.problems import get_problem  # Для получения тестовых задач
-from pymoo.util.ref_dirs import get_reference_directions
-from pymoo.visualization.scatter import Scatter  # Для визуализации
 from pydantic import BaseModel, Field
 
 from urbanomy.methods.investment_potential import (
@@ -41,10 +30,9 @@ from .constants import (
     DEFAULT_SQM_PER_PERSON,
     ORIGINAL_FEATURES,
     RADIUS_LIST,
-    ScenarioResultKey,
 )
 from .land_price_estimation import LandPriceEstimator
-from .scenario_modification import ScenarioTEPModifier, plot_scenario_impact
+from .scenario_modification import ScenarioTEPModifier
 
 
 def _json_ready(value: Any) -> Any:
@@ -89,14 +77,6 @@ def _message_to_text(message: Any) -> str:
     return str(message)
 
 
-def _strip_code_fences(text: str) -> str:
-    """Remove Markdown fences around JSON content."""
-    cleaned = str(text).strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    return cleaned.strip()
-
-
 class Evaluation(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
 
@@ -110,7 +90,6 @@ class StrategicAlignmentScorer:
         llm: Any | None = None,
         baseline: Any | None = None,
         prompt: str,
-        max_retries: int = 2,
     ) -> None:
         prompt_text = str(prompt).strip()
         if not prompt_text:
@@ -120,7 +99,6 @@ class StrategicAlignmentScorer:
         self._llm = llm
         self.baseline = baseline
         self.prompt = prompt_text
-        self.max_retries = max(0, int(max_retries))
         self._cache: dict[str, dict[str, Any]] = {}
 
     @property
@@ -134,7 +112,6 @@ class StrategicAlignmentScorer:
         copied._llm = self._llm
         copied.baseline = self.baseline
         copied.prompt = self.prompt
-        copied.max_retries = self.max_retries
         copied._cache = copy.deepcopy(self._cache, memo)
         return copied
 
@@ -156,60 +133,14 @@ class StrategicAlignmentScorer:
             f"{json.dumps(_json_ready(candidate_payload), ensure_ascii=False, separators=(',', ':'))}"
         )
 
-    def _repair_prompt(self, *, raw_text: str, error_text: str) -> str:
-        return (
-            "Исправь ответ так, чтобы он стал валидным JSON без markdown.\n"
-            'Верни только JSON формата {"score": 0.0}. '
-            "Поле score должно быть числом от 0 до 1.\n\n"
-            f"Ошибка: {error_text}\n\n"
-            f"Исходный ответ:\n{raw_text}"
-        )
-
-    def _parse_response(self, raw_response: Any) -> tuple[float, str]:
+    def _parse_response(self, raw_response: Any) -> float:
         if isinstance(raw_response, BaseModel):
-            payload: dict[str, Any] | None = raw_response.model_dump()
+            payload = raw_response.model_dump()
         elif isinstance(raw_response, Mapping):
             payload = dict(raw_response)
         else:
-            cleaned = _strip_code_fences(raw_response)
-            if not cleaned:
-                raise ValueError("Empty LLM response.")
-
-            try:
-                numeric = float(cleaned)
-            except ValueError:
-                numeric = None
-            if numeric is not None:
-                return max(0.0, min(1.0, numeric)), ""
-
-            payload = None
-            try:
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, Mapping):
-                    payload = dict(parsed)
-            except json.JSONDecodeError:
-                match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-                if match:
-                    parsed = json.loads(match.group(0))
-                    if isinstance(parsed, Mapping):
-                        payload = dict(parsed)
-
-        if payload is None:
-            raise ValueError(f"Unable to parse scorer JSON: {raw_response}")
-
-        if "score" not in payload and "content" in payload:
-            return self._parse_response(payload["content"])
-
-        if "score" not in payload:
-            fallback_score = payload.get("alignment_score", payload.get("ser_alignment_score"))
-            if fallback_score is not None:
-                payload["score"] = fallback_score
-
-        score = float(Evaluation.model_validate(payload).score)
-        reasoning = str(
-            payload.get("reasoning", payload.get("rationale", payload.get("summary", "")))
-        ).strip()
-        return score, reasoning
+            payload = json.loads(_message_to_text(raw_response))
+        return float(Evaluation.model_validate(payload).score)
 
     def score_candidate(
         self,
@@ -229,43 +160,12 @@ class StrategicAlignmentScorer:
             return cached
 
         prompt = self._build_prompt(candidate_payload=candidate_payload)
-        raw_text = self._invoke(prompt)
-        last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                score, reasoning = self._parse_response(raw_text)
-                result = {
-                    "score": float(score),
-                    "reasoning": reasoning,
-                    "candidate_payload": candidate_payload,
-                }
-                self._cache[cache_key] = result
-                return result
-            except Exception as exc:
-                last_error = exc
-                if attempt >= self.max_retries:
-                    break
-                raw_text = self._invoke(self._repair_prompt(raw_text=raw_text, error_text=str(exc)))
-
-        raise ValueError(f"Unable to obtain a valid strategic alignment score from LLM: {last_error}") from last_error
-
-
-def build_nsga3_reference_directions(
-    *,
-    n_obj: int,
-    pop_size: int | None = None,
-    n_partitions: int | None = None,
-) -> np.ndarray:
-    """Build Das-Dennis reference directions for NSGA-III."""
-    if n_obj < 3:
-        raise ValueError("NSGA-III reference directions are intended for 3 or more objectives.")
-
-    if n_partitions is None:
-        target_pop = max(int(pop_size or 0), 1)
-        n_partitions = 1
-        while math.comb(n_partitions + n_obj - 1, n_obj - 1) < target_pop:
-            n_partitions += 1
-    return get_reference_directions("das-dennis", n_obj, n_partitions=int(n_partitions))
+        result = {
+            "score": self._parse_response(self._invoke(prompt)),
+            "candidate_payload": candidate_payload,
+        }
+        self._cache[cache_key] = result
+        return result
 
 
 class DistrictProblem(Problem):
@@ -598,11 +498,6 @@ class DistrictProblem(Problem):
                         "llm score": (
                             float(alignment["score"]) if alignment is not None else None
                         ),
-                        "ser_alignment_reasoning": (
-                            str(alignment.get("reasoning", "")).strip()
-                            if alignment is not None
-                            else None
-                        ),
                     }
                 )
 
@@ -674,7 +569,6 @@ def _run_with_strategic_alignment(
     seed: int,
     save_history: bool,
     verbose: bool,
-    scorer_max_retries: int,
     log_optimization: bool,
     optimization_log_path: str | Path | None,
 ):
@@ -682,7 +576,6 @@ def _run_with_strategic_alignment(
         llm=llm,
         baseline=baseline,
         prompt=prompt,
-        max_retries=scorer_max_retries,
     )
     problem = DistrictProblem(
         blocks=blocks,
@@ -715,67 +608,6 @@ def _run_with_strategic_alignment(
     return result, problem
 
 
-def run_nsga3_with_strategic_alignment(
-    *,
-    blocks: GeoDataFrame,
-    model: CatBoostRegressor,
-    estimator_kwargs: Dict[str, Any],
-    constraints: Dict[str, Dict[str, Any]],
-    target_id: Any,
-    prompt: str,
-    llm: Any | None = None,
-    baseline: Any | None = None,
-    benchmarks: Mapping[LandUse, Dict[str, Any]] | None = None,
-    target_id_column: str = BlockColumn.ID.value,
-    pop_size: int = 20,
-    n_gen: int = 20,
-    seed: int = 42,
-    eliminate_duplicates: bool = True,
-    save_history: bool = True,
-    verbose: bool = True,
-    ref_dirs: np.ndarray | None = None,
-    ref_dir_partitions: int | None = None,
-    scorer_max_retries: int = 2,
-    log_optimization: bool = False,
-    optimization_log_path: str | Path | None = None,
-):
-    """Run district optimization with a third LLM-based strategic objective via NSGA-III."""
-    def algorithm(problem):
-        directions = ref_dirs
-        if directions is None:
-            directions = build_nsga3_reference_directions(
-                n_obj=problem.n_obj,
-                pop_size=pop_size,
-                n_partitions=ref_dir_partitions,
-            )
-        return NSGA3(
-            ref_dirs=directions,
-            pop_size=max(int(pop_size), len(directions)),
-            eliminate_duplicates=bool(eliminate_duplicates),
-        )
-
-    return _run_with_strategic_alignment(
-        blocks=blocks,
-        model=model,
-        estimator_kwargs=estimator_kwargs,
-        constraints=constraints,
-        target_id=target_id,
-        llm=llm,
-        baseline=baseline,
-        prompt=prompt,
-        benchmarks=benchmarks,
-        target_id_column=target_id_column,
-        algorithm=algorithm,
-        n_gen=n_gen,
-        seed=seed,
-        save_history=save_history,
-        verbose=verbose,
-        scorer_max_retries=scorer_max_retries,
-        log_optimization=log_optimization,
-        optimization_log_path=optimization_log_path,
-    )
-
-
 def run_nsga2_with_strategic_alignment(
     *,
     blocks: GeoDataFrame,
@@ -794,7 +626,6 @@ def run_nsga2_with_strategic_alignment(
     eliminate_duplicates: bool = True,
     save_history: bool = True,
     verbose: bool = True,
-    scorer_max_retries: int = 2,
     log_optimization: bool = False,
     optimization_log_path: str | Path | None = None,
 ):
@@ -818,7 +649,6 @@ def run_nsga2_with_strategic_alignment(
         seed=seed,
         save_history=save_history,
         verbose=verbose,
-        scorer_max_retries=scorer_max_retries,
         log_optimization=log_optimization,
         optimization_log_path=optimization_log_path,
     )
